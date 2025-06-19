@@ -1,0 +1,10 @@
+{ "translations": {
+    "Edit" : "Ẓreg",
+    "Delete" : "Kkes",
+    "Enabled" : "Yermed",
+    "Disabled" : "Ittwarermed",
+    "Back" : "Retour",
+    "Save" : "Sekles",
+    "Unknown error" : "Erreur inconnue"
+},"pluralForm" :"nplurals=2; plural=(n != 1);"
+}
