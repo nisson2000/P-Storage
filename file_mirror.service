@@ -1,0 +1,11 @@
+[Unit]
+Description=P-Storage download backup
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/file_mirror.sh
+Restart=always
+User=www-data
+
+[Install]
+WantedBy=multi-user.target

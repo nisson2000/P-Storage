@@ -1,0 +1,13 @@
+[Unit]
+Description=P-Storage yara scan
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/PStorage_scan.sh
+Restart=always
+RestartSec=5
+User=root
+StandardOutput=append:/var/log/apache2/PStorage.ntuee.temp_access.log
+
+[Install]
+WantedBy=multi-user.target

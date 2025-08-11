@@ -1,0 +1,9 @@
+[Unit]
+Description=Delete old backups by filename timestamp
+
+[Service]
+Type=oneshot
+Environment=TARGET_DIR=/path/to/your/backup
+Environment=RETENTION_DAYS=30
+Environment=DRY_RUN=0
+ExecStart=/usr/local/sbin/cleanup-by-timestamp.sh
