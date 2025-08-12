@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# install_nc_exchange.sh — Nextcloud internal <-> external exchange (PoC) installer
+# install_nc_exchange.sh — Nextcloud internal <-> external exchange (PoC) installer (auto-scan enabled)
 set -Eeuo pipefail
 
-# ===== 依你的環境調整（預設填你目前使用的值） =====
+# ===== 依你的環境調整（預設為你目前的值） =====
 NC_ROOT="/var/www/PStorage.ntuee.temp"
 DATA_DIR="/var/www/PStorage.ntuee.temp/data"
 WEB_USER="www-data"
@@ -48,9 +48,7 @@ EOF
 }
 
 create_nc_dirs(){
-  # 建 internal/external/quarantine
   sudo -u "$WEB_USER" mkdir -p "$SRC_INTERNAL" "$SRC_EXTERNAL" "$QUAR_DIR"
-  # 讓 Nextcloud 認得目錄
   sudo -u "$WEB_USER" php "$NC_ROOT/occ" files:scan --path="$ADMIN_USER/files" >/dev/null
 }
 
@@ -61,6 +59,7 @@ set -Eeuo pipefail
 # shellcheck disable=SC1091
 source /etc/default/nc-exchange
 
+OCC="$NC_ROOT/occ"
 STATE_DIR="/var/lib/nc-exchange"
 RECENT="$STATE_DIR/recent.log"
 FLAG_AUTO="$STATE_DIR/AUTO_ON"
@@ -71,16 +70,11 @@ chown "$WEB_USER:$WEB_USER" "$QUAR_DIR" || true
 ts_utc(){ date -u +%Y%m%dT%H%M%SZ; }
 now(){ date +%s; }
 
-is_on(){
-  [[ "${AUTO_EXCHANGE:-0}" = "1" || -f "$FLAG_AUTO" ]]
-}
+is_on(){ [[ "${AUTO_EXCHANGE:-0}" = "1" || -f "$FLAG_AUTO" ]]; }
 
 hash_file(){ sha256sum -- "$1" | awk '{print $1}'; }
 
-mark_recent(){
-  local h="$1" side="$2" t
-  t="$(now)"; printf '%s %s %s\n' "$t" "$side" "$h" >> "$RECENT"
-}
+mark_recent(){ printf '%s %s %s\n' "$(now)" "$2" "$1" >> "$RECENT"; }
 
 seen_recent(){
   local h="$1" t_cut; t_cut=$(( $(now) - 90 ))
@@ -117,16 +111,27 @@ scan_pre_copy(){
   return 0
 }
 
+scan_single(){
+  # 目的側單檔掃描，讓 Web 介面立即顯示
+  local side="$1" base="$2" path=""
+  case "$side" in
+    internal) path="$ADMIN_USER/files/internal/$base" ;;
+    external) path="$ADMIN_USER/files/external/$base" ;;
+    *) return 0 ;;
+  esac
+  sudo -u "$WEB_USER" php "$OCC" files:scan --path="$path" >/dev/null 2>&1 || true
+}
+
 copy_overwrite(){
   local src="$1" dst_dir="$2" base dest
   base="$(basename "$src")"; dest="$dst_dir/$base"
   if ! cp --reflink=auto -- "$src" "$dest" 2>/dev/null; then cp -- "$src" "$dest"; fi
   chown "$WEB_USER:$WEB_USER" "$dest"
-  echo "$dest"
+  printf '%s\n' "$base"
 }
 
 handle_event(){
-  local path="$1" side="$2" other_dir hash
+  local path="$1" side="$2" other_dir hash base dest_side
   [[ -f "$path" ]] || return 0
   [[ "$path" == *.part ]] && return 0
   [[ "$path" != *"/files_versions/"* && "$path" != *"/files_trashbin/"* && "$path" != *"/uploads/"* ]] || return 0
@@ -134,8 +139,8 @@ handle_event(){
   if ! is_on; then echo "[exchange][skip] AUTO_EXCHANGE=off : $path"; return 0; fi
 
   case "$side" in
-    internal) other_dir="$DST_EXTERNAL" ;;
-    external) other_dir="$DST_INTERNAL" ;;
+    internal) other_dir="$DST_EXTERNAL"; dest_side="external" ;;
+    external) other_dir="$DST_INTERNAL"; dest_side="internal" ;;
     *) echo "[exchange][ERR] unknown side: $side"; return 1 ;;
   esac
 
@@ -147,7 +152,7 @@ handle_event(){
 
   scan_pre_copy "$path"; rc=$?
   case "$rc" in
-    0|10) : ;;  # allow / log-only
+    0|10) : ;;
     20) echo "[exchange][block] $path"; return 0 ;;
     30)
        base="$(basename "$path")"
@@ -157,8 +162,12 @@ handle_event(){
        echo "[exchange][quarantine] $path -> $q"; return 0 ;;
   esac
 
-  dest="$(copy_overwrite "$path" "$other_dir")"
-  echo "[exchange][sync] $side -> $( [[ $side = internal ]] && echo external || echo internal ): $path -> $dest"
+  base="$(copy_overwrite "$path" "$other_dir")"
+  echo "[exchange][sync] $side -> $dest_side: $path -> $other_dir/$base"
+
+  # 新增：目的側單檔掃描，立即出現在 Web 介面
+  scan_single "$dest_side" "$base"
+
   mark_recent "$hash" "$side"
 }
 
@@ -186,7 +195,7 @@ EOF
 install_service(){
   cat >/etc/systemd/system/nc-exchange-sync.service <<'EOF'
 [Unit]
-Description=Nextcloud internal <-> external exchange PoC (inotify)
+Description=Nextcloud internal <-> external exchange PoC (inotify + auto scan)
 After=network.target
 
 [Service]
@@ -208,23 +217,18 @@ post_msg(){
   systemctl --no-pager --full status nc-exchange-sync.service || true
   cat <<'TIP'
 
-✔ 安裝完成！
+✔ 安裝完成（已啟用「目的側單檔 files:scan」— Web 介面會立即顯示）。
 
-操作指令：
-  # 追即時日誌
+常用操作：
   journalctl -u nc-exchange-sync.service -f
-
-  # 開/關自動同步（方式一：改設定）
+  # 開/關自動同步（改設定值）
   sudo sed -i 's/^AUTO_EXCHANGE=.*/AUTO_EXCHANGE=1/' /etc/default/nc-exchange
   sudo systemctl restart nc-exchange-sync.service
-  # 關閉：改成 0 後重啟
-
-  # 開/關自動同步（方式二：旗標檔）
-  sudo touch /var/lib/nc-exchange/AUTO_ON        # 開
-  sudo rm -f /var/lib/nc-exchange/AUTO_ON        # 關
+  # 或用旗標檔
+  sudo touch /var/lib/nc-exchange/AUTO_ON   # 開
+  sudo rm -f /var/lib/nc-exchange/AUTO_ON   # 關
 
 啟用 YARA（選用）：
-  # 例：規則放在 /usr/local/share/yara/*.yar
   sudo sed -i 's|^YARA_RULES=.*|YARA_RULES="/usr/local/share/yara/*.yar"|' /etc/default/nc-exchange
   sudo sed -i 's|^SCAN_MODE=.*|SCAN_MODE="enforce"|' /etc/default/nc-exchange
   sudo systemctl restart nc-exchange-sync.service
@@ -242,3 +246,4 @@ main(){
   post_msg
 }
 main
+
