@@ -1,0 +1,13 @@
+[Unit]
+Description=Nextcloud audit upload mirror (inotify)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/nc_audit_upload_mirror.sh
+Restart=always
+RestartSec=2
+User=root
+
+[Install]
+WantedBy=multi-user.target
