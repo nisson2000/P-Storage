@@ -7,7 +7,7 @@ set -Eeuo pipefail
 PSTORAGE_ROOT="/var/www/PStorage.ntuee.temp"
 DATA_DIR="$PSTORAGE_ROOT/data"
 WEB_USER="www-data"
-BASE_URL="https://pstorage.ntuee.temp"     # 你的 PStorage/Nextcloud 站台 URL
+BASE_URL="https://pstorage.ntuee.temp:3000"     # 你的 PStorage/Nextcloud 站台 URL
 ADMIN_USER="admin"
 
 ### ====== 參數與選項 ======
@@ -69,7 +69,7 @@ echo "== 1) 建立使用者：$USER"
 # 若已存在，occ 會失敗；做 idempotent：存在就略過
 if ! OCC user:info "$USER" >/dev/null 2>&1; then
   # --password-from-env：用 stdin 填兩次密碼
-  printf '%s\n%s\n' "$PASS" "$PASS" | OCC user:add --password-from-env --display-name "$DNAME" "$USER"
+  printf '%s\n%s\n' "$PASS" "$PASS" | OCC user:add --display-name "$DNAME" "$USER"
 else
   echo "使用者 $USER 已存在，略過新增。"
 fi
@@ -100,18 +100,30 @@ share_path "$USER" "$PASS" "/internal"
 share_path "$USER" "$PASS" "/external"
 
 echo "== 4) 在 admin 視圖改名與歸檔（不影響使用者實體路徑）"
-# 建立 /Users/<user>/ 容器
-mkcol() {
-  local url="$1"
-  curl "${CURLFLAGS[@]}" -u "$ADMIN_USER:$ADMIN_PASS" -X MKCOL "$url" >/dev/null || true
-}
-enc() { python3 - <<'PY' "$1"
-import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe="/()_-.")) 
+
+enc_path() {
+  python3 - "$1" <<'PY'
+import sys, urllib.parse
+p = sys.argv[1]
+# 逐段編碼，避免把 "https://" 之類的東西編掉
+print("/".join(urllib.parse.quote(seg, safe="()_.-") for seg in p.split("/")))
 PY
 }
+
+url_join() {
+  local path="$1"                # 例如：/remote.php/dav/files/admin/Users/test1
+  printf '%s%s' "$BASE_URL" "$(enc_path "$path")"
+}
+
+mkcol() {
+  local path="$1"                # 只給 path，不要給整個 URL
+  local url; url="$(url_join "$path")"
+  curl "${CURLFLAGS[@]}" -u "$ADMIN_USER:$ADMIN_PASS" -X MKCOL "$url" >/dev/null || true
+}
+
 ADMIN_ROOT_DAV="$BASE_URL/remote.php/dav/files/$ADMIN_USER"
-mkcol "$(enc "$ADMIN_ROOT_DAV/Users")"
-mkcol "$(enc "$ADMIN_ROOT_DAV/Users/$USER")"
+mkcol "$(enc_path "$ADMIN_ROOT_DAV/Users")"
+mkcol "$(enc_path "$ADMIN_ROOT_DAV/Users/$USER")"
 
 # 查 admin 端「與我共享」清單，找出 owner=$USER 的兩筆分享的掛載點（file_target）
 list_shared_with_me() {
@@ -129,15 +141,17 @@ get_target_for() {
 }
 
 move_mount() {
-  local from_rel="$1" to_rel="$2"
-  local SRC="$(enc "$ADMIN_ROOT_DAV$from_rel")"
-  local DST="$(enc "$ADMIN_ROOT_DAV$to_rel")"
-  # 若目標已存在，先附加時間尾碼避免衝突
-  curl "${CURLFLAGS[@]}" -u "$ADMIN_USER:$ADMIN_PASS" -X MOVE "$SRC" -H "Destination: $DST" >/dev/null || {
-    ts="$(date -u +%Y%m%dT%H%M%SZ)"
-    DST="$(enc "$ADMIN_ROOT_DAV${to_rel}_$ts")"
+  local from_path="$1"           # 來源 path（admin 視圖下的掛載點 path）
+  local to_path="$2"             # 目的 path
+  local SRC DST
+  SRC="$(url_join "$from_path")"
+  DST="$(url_join "$to_path")"
+  # 目標已存在可能會失敗；失敗就附加時間尾碼再試一次
+  if ! curl "${CURLFLAGS[@]}" -u "$ADMIN_USER:$ADMIN_PASS" -X MOVE "$SRC" -H "Destination: $DST" >/dev/null; then
+    local ts; ts="$(date -u +%Y%m%dT%H%M%SZ)"
+    DST="$(url_join "${to_path}_${ts}")"
     curl "${CURLFLAGS[@]}" -u "$ADMIN_USER:$ADMIN_PASS" -X MOVE "$SRC" -H "Destination: $DST" >/dev/null
-  }
+  fi
 }
 
 # 等待分享在 admin 端可見（輪詢最多 30s）
